@@ -1,0 +1,20 @@
+# Binarios
+/engine
+/out
+*.exe
+
+# Entorno
+.env
+.env.local
+
+# Llaves DKIM (NUNCA al repo)
+/keys/
+*.pem
+
+# Go
+/vendor/
+
+# Editor
+.idea/
+.vscode/
+*.log
