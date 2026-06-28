@@ -1,0 +1,4 @@
+# Forzar LF en todo el repo (se compila en Linux/Docker)
+* text=auto eol=lf
+*.go text eol=lf
+Dockerfile text eol=lf
