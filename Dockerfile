@@ -2,7 +2,7 @@
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY . .
-RUN go mod download
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/engine ./cmd/engine
 
 # ─── Runtime ───

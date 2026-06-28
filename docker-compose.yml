@@ -1,0 +1,14 @@
+# Despliegue del motor en el VPS. Lo gestiona Claude por SSH:
+#   docker compose up -d --build
+#
+# network_mode: host  → el motor usa la red del host directamente. Es CLAVE
+# para un MTA: salida por el puerto 25 con la IP del servidor y, a futuro,
+# bind de IP de origen por cliente (pool de IPs). Sin NAT de Docker en medio.
+services:
+  engine:
+    build: .
+    container_name: tw-mail-engine
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env

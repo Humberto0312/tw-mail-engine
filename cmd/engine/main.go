@@ -37,11 +37,17 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 4. Mongo (misma DB que api-matrix)
-	mongoClient, err := core.ConnectMongo(ctx, cfg.MongoURI, cfg.MongoDB)
-	if err != nil {
-		log.Error("conectando Mongo: %v", err)
-		os.Exit(1)
+	// 4. Mongo (misma DB que api-matrix) — NO fatal: si no está, el motor
+	// igual levanta y responde /health (modo salud, sin procesar envíos).
+	var mongoClient *core.MongoClient
+	if cfg.MongoURI != "" {
+		mongoClient, err = core.ConnectMongo(ctx, cfg.MongoURI, cfg.MongoDB)
+		if err != nil {
+			log.Warn("Mongo no disponible (%v) — arranco en modo salud, sin procesar envíos", err)
+			mongoClient = nil
+		}
+	} else {
+		log.Warn("MONGO_URI vacío — modo salud (solo /health), sin procesar envíos")
 	}
 	defer mongoClient.Close(context.Background())
 

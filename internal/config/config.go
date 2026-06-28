@@ -60,14 +60,14 @@ func Load() (*Config, error) {
 		DKIMSelector:       getEnv("DKIM_SELECTOR", "twmail"),
 	}
 
-	if cfg.MongoURI == "" {
-		return nil, fmt.Errorf("MONGO_URI requerido (revisa .env o variables de entorno)")
-	}
 	if cfg.APIToken == "" {
 		return nil, fmt.Errorf("ENGINE_API_TOKEN requerido (sin él nadie puede pedir envíos)")
 	}
 
-	if cfg.MongoDB == "" {
+	// Mongo es OPCIONAL al arrancar: el motor levanta y responde /health aunque
+	// Mongo no esté configurado/disponible. Sin Mongo no procesa envíos (solo
+	// salud); en cuanto haya URI válida, opera normal.
+	if cfg.MongoURI != "" && cfg.MongoDB == "" {
 		db, err := extractDBFromURI(cfg.MongoURI)
 		if err != nil {
 			return nil, fmt.Errorf("MONGO_DB no definido y no se pudo extraer del URI: %w", err)
