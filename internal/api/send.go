@@ -25,6 +25,7 @@ type SendRequest struct {
 	HTML       string            `json:"html"`
 	Text       string            `json:"text,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
+	DailyLimit int               `json:"dailyLimit,omitempty"` // tope diario de la empresa (0 = sin tope)
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +68,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID: messageID, TenantID: req.TenantID, CampaignID: req.CampaignID,
 			FromName: req.FromName, FromEmail: req.FromEmail, ReplyTo: req.ReplyTo,
 			To: req.To, Subject: req.Subject, HTML: req.HTML, Text: req.Text, Headers: req.Headers,
+			DailyLimit: req.DailyLimit,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "no se pudo encolar: "+err.Error())

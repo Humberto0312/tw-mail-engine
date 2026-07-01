@@ -48,7 +48,9 @@ func (s *Signer) Sign(raw []byte) ([]byte, error) {
 		Signer:                 s.key,
 		HeaderCanonicalization: dkim.CanonicalizationRelaxed,
 		BodyCanonicalization:   dkim.CanonicalizationRelaxed,
-		HeaderKeys:             []string{"From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type"},
+		// List-Unsubscribe* firmados: Gmail/Yahoo exigen one-click unsubscribe
+		// cubierto por DKIM. go-msgauth omite los que no existan en el mensaje.
+		HeaderKeys: []string{"From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type", "List-Unsubscribe", "List-Unsubscribe-Post"},
 	}
 	var out bytes.Buffer
 	if err := dkim.Sign(&out, bytes.NewReader(raw), options); err != nil {

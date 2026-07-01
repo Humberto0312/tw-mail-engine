@@ -76,6 +76,23 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 		return
 	}
 
+	// Guardrails por empresa: pausa por reputación + límite diario propio.
+	if m.TenantID != "" {
+		paused, sentToday, _, terr := q.st.TenantDaily(ctx, m.TenantID)
+		if terr == nil {
+			if paused {
+				_ = q.st.MarkFailed(ctx, m.ID, "empresa pausada por reputación (quejas/rebotes altos)", attempts)
+				q.log.Warn("empresa %s pausada — %s no enviado", m.TenantID, m.To)
+				return
+			}
+			if m.DailyLimit > 0 && sentToday >= m.DailyLimit {
+				_ = q.st.Reschedule(ctx, m.ID, nextDayUTC(), "límite diario de la empresa alcanzado", m.Attempts)
+				q.log.Info("empresa %s alcanzó su límite diario (%d) — %s diferido a mañana", m.TenantID, m.DailyLimit, m.To)
+				return
+			}
+		}
+	}
+
 	// Warm-up: respetar el tope diario de la IP (difiere a mañana si se alcanzó).
 	if q.warmup {
 		startedAt, used, werr := q.st.WarmupToday(ctx, q.warmupKey)
@@ -112,6 +129,9 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 		if q.warmup {
 			_ = q.st.WarmupInc(ctx, q.warmupKey)
 		}
+		if m.TenantID != "" {
+			_ = q.st.TenantIncSent(ctx, m.TenantID)
+		}
 		q.log.Info("enviado to=%s intentos=%d", m.To, attempts)
 		return
 	}
@@ -119,6 +139,17 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 	if de.Permanent {
 		_ = q.st.MarkFailed(ctx, m.ID, de.Msg, attempts)
 		_ = q.st.Suppress(ctx, m.To, "hard_bounce")
+		if m.TenantID != "" {
+			_ = q.st.TenantIncBounced(ctx, m.TenantID)
+			// Auto-pausa: si la tasa de rebotes duros del día es alta, frenar la empresa.
+			if _, sent, bounced, e := q.st.TenantDaily(ctx, m.TenantID); e == nil {
+				total := sent + bounced
+				if total >= 20 && bounced*100 >= total*10 {
+					_ = q.st.TenantPause(ctx, m.TenantID, "tasa de rebotes duros alta")
+					q.log.Warn("AUTO-PAUSA empresa %s: %d rebotes de %d intentos hoy (>=10%%)", m.TenantID, bounced, total)
+				}
+			}
+		}
 		q.log.Warn("rebote duro to=%s: %s (suprimido)", m.To, de.Msg)
 		return
 	}

@@ -95,7 +95,8 @@ type Message struct {
 	HTML        string             `bson:"html"`
 	Text        string             `bson:"text,omitempty"`
 	Headers     map[string]string  `bson:"headers,omitempty"`
-	Status      string             `bson:"status"` // queued|sending|sent|failed
+	DailyLimit  int                `bson:"dailyLimit,omitempty"` // tope diario de la empresa (0 = sin tope)
+	Status      string             `bson:"status"`               // queued|sending|sent|failed
 	Attempts    int                `bson:"attempts"`
 	NextAttempt time.Time          `bson:"nextAttempt"`
 	LastError   string             `bson:"lastError,omitempty"`
@@ -198,5 +199,56 @@ func (s *Store) WarmupInc(ctx context.Context, ip string) error {
 		bson.M{"$inc": bson.M{"count": 1}, "$set": bson.M{"day": today}},
 		options.Update().SetUpsert(true),
 	)
+	return err
+}
+
+// ---------- Guardrails por empresa (tenant): límite diario + auto-pausa ----------
+
+// TenantDaily devuelve (pausada, enviados hoy, rebotados hoy), reseteando los
+// contadores diarios si cambió el día.
+func (s *Store) TenantDaily(ctx context.Context, tenantID string) (bool, int, int, error) {
+	today := time.Now().UTC().Format("2006-01-02")
+	var doc struct {
+		Paused  bool   `bson:"paused"`
+		Day     string `bson:"day"`
+		Sent    int    `bson:"sentToday"`
+		Bounced int    `bson:"bouncedToday"`
+	}
+	e := s.col("mail_tenants").FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&doc)
+	if e == mongo.ErrNoDocuments {
+		_, ie := s.col("mail_tenants").InsertOne(ctx, bson.M{"tenantId": tenantID, "paused": false, "day": today, "sentToday": 0, "bouncedToday": 0})
+		return false, 0, 0, ie
+	}
+	if e != nil {
+		return false, 0, 0, e
+	}
+	if doc.Day != today {
+		_, _ = s.col("mail_tenants").UpdateOne(ctx, bson.M{"tenantId": tenantID},
+			bson.M{"$set": bson.M{"day": today, "sentToday": 0, "bouncedToday": 0}})
+		return doc.Paused, 0, 0, nil
+	}
+	return doc.Paused, doc.Sent, doc.Bounced, nil
+}
+
+func (s *Store) TenantIncSent(ctx context.Context, tenantID string) error {
+	today := time.Now().UTC().Format("2006-01-02")
+	_, err := s.col("mail_tenants").UpdateOne(ctx, bson.M{"tenantId": tenantID},
+		bson.M{"$inc": bson.M{"sentToday": 1}, "$set": bson.M{"day": today}},
+		options.Update().SetUpsert(true))
+	return err
+}
+
+func (s *Store) TenantIncBounced(ctx context.Context, tenantID string) error {
+	today := time.Now().UTC().Format("2006-01-02")
+	_, err := s.col("mail_tenants").UpdateOne(ctx, bson.M{"tenantId": tenantID},
+		bson.M{"$inc": bson.M{"bouncedToday": 1}, "$set": bson.M{"day": today}},
+		options.Update().SetUpsert(true))
+	return err
+}
+
+func (s *Store) TenantPause(ctx context.Context, tenantID, reason string) error {
+	_, err := s.col("mail_tenants").UpdateOne(ctx, bson.M{"tenantId": tenantID},
+		bson.M{"$set": bson.M{"paused": true, "pausedReason": reason, "pausedAt": time.Now()}},
+		options.Update().SetUpsert(true))
 	return err
 }
