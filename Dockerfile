@@ -7,8 +7,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/engine 
 
 # ─── Runtime ───
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 mail
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 engine
 COPY --from=build /out/engine /usr/local/bin/engine
-USER mail
+USER engine
 EXPOSE 8080
 ENTRYPOINT ["engine"]

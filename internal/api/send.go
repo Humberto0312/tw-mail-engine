@@ -1,33 +1,31 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
+
+	"tw-mail-engine/internal/dkim"
+	"tw-mail-engine/internal/message"
 )
 
 // SendRequest — contrato que api-matrix manda al motor para entregar un correo.
-// El FromEmail DEBE pertenecer a un dominio verificado del tenant (lo valida el
-// motor antes de entregar); api-matrix ya compiló el HTML autoritativo.
 type SendRequest struct {
-	TenantID   string            `json:"tenantId"`             // instituto dueño del envío
-	CampaignID string            `json:"campaignId,omitempty"` // campaña/secuencia origen
-	MessageID  string            `json:"messageId,omitempty"`  // id idempotente (evita doble envío)
+	TenantID   string            `json:"tenantId"`
+	CampaignID string            `json:"campaignId,omitempty"`
+	MessageID  string            `json:"messageId,omitempty"`
 	FromName   string            `json:"fromName"`
-	FromEmail  string            `json:"fromEmail"` // remitente, de un dominio verificado
+	FromEmail  string            `json:"fromEmail"`
 	ReplyTo    string            `json:"replyTo,omitempty"`
 	To         string            `json:"to"`
 	Subject    string            `json:"subject"`
 	HTML       string            `json:"html"`
 	Text       string            `json:"text,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"` // List-Unsubscribe, etc.
+	Headers    map[string]string `json:"headers,omitempty"`
 }
 
-// handleSend — recibe la orden de envío de api-matrix.
-//
-// Pipeline previsto (siguiente módulo): validar dominio verificado del tenant →
-// elegir IP del pool (warm-up) → firmar DKIM con la llave del dominio →
-// resolver MX del destinatario → entregar por SMTP puerto 25 → registrar estado
-// y reportar rebotes/quejas al webhook de api-matrix.
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	var req SendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -39,6 +37,77 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.log.Info("recibido /v1/send tenant=%s to=%s (pipeline pendiente)", req.TenantID, req.To)
-	writeError(w, http.StatusNotImplemented, "pipeline de entrega aún no montado (siguiente módulo)")
+	ctx := r.Context()
+
+	// Supresión: no enviar a rebotes duros / quejas / bajas.
+	if s.store != nil {
+		if sup, _ := s.store.IsSuppressed(ctx, req.To); sup {
+			writeError(w, http.StatusForbidden, "destinatario en lista de supresión")
+			return
+		}
+	}
+
+	// Firma DKIM del dominio del remitente (multi-dominio).
+	signer, err := s.resolveSigner(ctx, req.FromEmail)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	now := time.Now()
+	messageID := req.MessageID
+	if messageID == "" {
+		messageID = fmt.Sprintf("<%d@%s>", now.UnixNano(), s.cfg.Hostname)
+	}
+
+	raw := message.Build(message.Outgoing{
+		FromName:  req.FromName,
+		FromEmail: req.FromEmail,
+		ReplyTo:   req.ReplyTo,
+		To:        req.To,
+		Subject:   req.Subject,
+		HTML:      req.HTML,
+		Text:      req.Text,
+		Headers:   req.Headers,
+	}, now, messageID)
+
+	if signer != nil {
+		if signed, serr := signer.Sign(raw); serr != nil {
+			s.log.Warn("DKIM no pudo firmar (%v) — envío sin firma", serr)
+		} else {
+			raw = signed
+		}
+	}
+
+	if err := s.mailer.Deliver(ctx, req.FromEmail, req.To, raw); err != nil {
+		s.log.Warn("entrega fallida to=%s: %v", req.To, err)
+		writeError(w, http.StatusBadGateway, "fallo en la entrega: "+err.Error())
+		return
+	}
+
+	s.log.Info("entregado to=%s tenant=%s msgId=%s", req.To, req.TenantID, messageID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "messageId": messageID})
+}
+
+// resolveSigner devuelve el firmante DKIM del dominio del remitente.
+// 1) dominio registrado y verificado en el store → su llave.
+// 2) fallback: dominio del .env (mta1...) con la llave montada.
+func (s *Server) resolveSigner(ctx context.Context, fromEmail string) (*dkim.Signer, error) {
+	dom := domainOf(fromEmail)
+	if dom == "" {
+		return nil, fmt.Errorf("fromEmail inválido")
+	}
+	if s.store != nil {
+		d, err := s.store.GetDomain(ctx, dom)
+		if err == nil && d != nil {
+			if d.Status != "verified" {
+				return nil, fmt.Errorf("el dominio %s no está verificado", dom)
+			}
+			return dkim.NewSigner(d.Domain, d.Selector, d.DKIMPrivate)
+		}
+	}
+	if s.signer != nil && dom == s.cfg.DKIMDomain {
+		return s.signer, nil
+	}
+	return nil, fmt.Errorf("el dominio %s no está registrado; regístralo y verifícalo primero", dom)
 }

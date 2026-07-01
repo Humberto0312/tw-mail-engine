@@ -9,41 +9,49 @@ import (
 
 	"tw-mail-engine/internal/config"
 	"tw-mail-engine/internal/core"
+	"tw-mail-engine/internal/dkim"
+	"tw-mail-engine/internal/domain"
+	"tw-mail-engine/internal/sender"
+	"tw-mail-engine/internal/store"
 )
 
 // Server — HTTP API del motor de envíos.
-// Rutas públicas: /health.
-// Rutas protegidas (Bearer token): /v1/*  (las llama api-matrix).
 type Server struct {
-	cfg   *config.Config
-	mongo *core.MongoClient
-	log   *core.Logger
-	srv   *http.Server
+	cfg       *config.Config
+	mongo     *core.MongoClient
+	store     *store.Store    // puede ser nil (sin Mongo)
+	domainSvc *domain.Service // puede ser nil (sin Mongo)
+	signer    *dkim.Signer    // firma por defecto del .env (fallback)
+	mailer    *sender.Mailer
+	log       *core.Logger
+	srv       *http.Server
 }
 
-func NewServer(cfg *config.Config, mongo *core.MongoClient) *Server {
+func NewServer(cfg *config.Config, mongo *core.MongoClient, st *store.Store, domainSvc *domain.Service, signer *dkim.Signer, mailer *sender.Mailer) *Server {
 	return &Server{
-		cfg:   cfg,
-		mongo: mongo,
-		log:   core.Root().With("http-api"),
+		cfg:       cfg,
+		mongo:     mongo,
+		store:     st,
+		domainSvc: domainSvc,
+		signer:    signer,
+		mailer:    mailer,
+		log:       core.Root().With("http-api"),
 	}
 }
 
-// Start — arranca el server HTTP. No bloquea.
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
-
-	// Público
 	mux.HandleFunc("GET /health", s.handleHealth)
-
-	// Protegido (Bearer token)
 	mux.HandleFunc("POST /v1/send", s.auth(s.handleSend))
+	mux.HandleFunc("POST /v1/domains", s.auth(s.handleRegisterDomain))
+	mux.HandleFunc("POST /v1/domains/verify", s.auth(s.handleVerifyDomain))
+	mux.HandleFunc("POST /v1/suppress", s.auth(s.handleSuppress))
 
 	s.srv = &http.Server{
 		Addr:         ":" + s.cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 60 * time.Second,
 	}
 
 	s.log.Info("HTTP escuchando en :%s", s.cfg.Port)
@@ -55,7 +63,6 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop — apaga el server con grace period.
 func (s *Server) Stop(ctx context.Context) error {
 	if s.srv == nil {
 		return nil
@@ -63,11 +70,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// auth — middleware que exige Authorization: Bearer <ENGINE_API_TOKEN>.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(h, "Bearer ")
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" || token != s.cfg.APIToken {
 			writeError(w, http.StatusUnauthorized, "token inválido o ausente")
 			return
@@ -84,4 +89,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func domainOf(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return ""
+	}
+	return strings.ToLower(email[at+1:])
 }

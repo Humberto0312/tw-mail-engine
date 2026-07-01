@@ -37,8 +37,14 @@ type Config struct {
 	// Webhook de vuelta a api-matrix (entregas/rebotes/quejas)
 	BounceWebhookURL string
 
-	// DKIM
+	// DKIM (firma del correo). Por ahora un solo dominio vía env; multi-dominio
+	// por tenant (leído de Mongo) vendrá después.
 	DKIMSelector string
+	DKIMDomain   string // dominio que firma por defecto (fallback del .env)
+	DKIMKeyPath  string // ruta al PEM de la llave privada (montado en el VPS)
+
+	// IP pública usada para generar los registros SPF de los dominios de clientes.
+	PublicIP string
 }
 
 // Load carga la config desde .env (si existe) + variables de entorno.
@@ -58,6 +64,9 @@ func Load() (*Config, error) {
 		MaxDeliveryRetries: getEnvInt("MAX_DELIVERY_RETRIES", 4),
 		BounceWebhookURL:   getEnv("BOUNCE_WEBHOOK_URL", ""),
 		DKIMSelector:       getEnv("DKIM_SELECTOR", "twmail"),
+		DKIMDomain:         getEnv("DKIM_DOMAIN", ""),
+		DKIMKeyPath:        getEnv("DKIM_PRIVATE_KEY_PATH", ""),
+		PublicIP:           getEnv("PUBLIC_IP", ""),
 	}
 
 	if cfg.APIToken == "" {

@@ -10,6 +10,10 @@ import (
 	"tw-mail-engine/internal/api"
 	"tw-mail-engine/internal/config"
 	"tw-mail-engine/internal/core"
+	"tw-mail-engine/internal/dkim"
+	"tw-mail-engine/internal/domain"
+	"tw-mail-engine/internal/sender"
+	"tw-mail-engine/internal/store"
 )
 
 const banner = `
@@ -51,15 +55,45 @@ func main() {
 	}
 	defer mongoClient.Close(context.Background())
 
-	// 5. HTTP API
-	srv := api.NewServer(cfg, mongoClient)
+	// 5. Firma DKIM (opcional). Si no hay llave, se envía sin firma.
+	var signer *dkim.Signer
+	if cfg.DKIMDomain != "" && cfg.DKIMKeyPath != "" {
+		pemBytes, rerr := os.ReadFile(cfg.DKIMKeyPath)
+		if rerr != nil {
+			log.Warn("DKIM: no pude leer la llave en %s (%v) — envío SIN firma", cfg.DKIMKeyPath, rerr)
+		} else if sg, serr := dkim.NewSigner(cfg.DKIMDomain, cfg.DKIMSelector, string(pemBytes)); serr != nil {
+			log.Warn("DKIM: %v — envío SIN firma", serr)
+		} else {
+			signer = sg
+			log.Info("DKIM activo — dominio=%s selector=%s", cfg.DKIMDomain, cfg.DKIMSelector)
+		}
+	} else {
+		log.Warn("DKIM no configurado (DKIM_DOMAIN/DKIM_PRIVATE_KEY_PATH) — envío SIN firma")
+	}
+
+	// 6. Mailer (entrega SMTP por puerto 25)
+	mailer := sender.NewMailer(cfg.Hostname, cfg.SendIPs)
+
+	// 7. Store + servicio de dominios (multi-tenant) — requieren Mongo.
+	var st *store.Store
+	var domainSvc *domain.Service
+	if mongoClient != nil {
+		st = store.New(mongoClient)
+		domainSvc = domain.NewService(st, cfg.DKIMSelector, cfg.PublicIP)
+		log.Info("multi-dominio activo — verificación y supresión disponibles")
+	} else {
+		log.Warn("sin Mongo — multi-dominio y supresión deshabilitados (solo dominio del .env)")
+	}
+
+	// 8. HTTP API
+	srv := api.NewServer(cfg, mongoClient, st, domainSvc, signer, mailer)
 	if err := srv.Start(); err != nil {
 		log.Error("arrancando HTTP: %v", err)
 		os.Exit(1)
 	}
 	log.Info("tw-mail-engine listo — esperando órdenes de api-matrix")
 
-	// 6. Esperar apagado
+	// 8. Esperar apagado
 	<-ctx.Done()
 	log.Info("señal de apagado recibida — cerrando con grace")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
