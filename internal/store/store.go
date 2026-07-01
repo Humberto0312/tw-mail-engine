@@ -105,6 +105,16 @@ type Message struct {
 }
 
 func (s *Store) Enqueue(ctx context.Context, m Message) (string, error) {
+	// Idempotencia: si ya existe un mensaje con este messageId, NO re-encolar.
+	// Esto hace seguros los reintentos de api-matrix (un timeout de red no duplica).
+	if m.MessageID != "" {
+		var existing struct {
+			ID primitive.ObjectID `bson:"_id"`
+		}
+		if s.col("mail_messages").FindOne(ctx, bson.M{"messageId": m.MessageID}).Decode(&existing) == nil {
+			return existing.ID.Hex(), nil
+		}
+	}
 	m.Status = "queued"
 	m.CreatedAt = time.Now()
 	if m.NextAttempt.IsZero() {
