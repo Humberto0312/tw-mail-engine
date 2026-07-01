@@ -252,3 +252,21 @@ func (s *Store) TenantPause(ctx context.Context, tenantID, reason string) error 
 		options.Update().SetUpsert(true))
 	return err
 }
+
+// ---------- Pool de IPs (IP dedicada por empresa) ----------
+
+// TenantIP devuelve la IP de salida asignada a la empresa (IP dedicada) o "" si
+// usa el pool compartido. Base para vender IP dedicada por cliente.
+func (s *Store) TenantIP(ctx context.Context, tenantID string) (string, error) {
+	var doc struct {
+		IP string `bson:"ip"`
+	}
+	err := s.col("mail_ippool").FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return doc.IP, nil
+}

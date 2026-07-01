@@ -82,7 +82,7 @@ func main() {
 	if mongoClient != nil {
 		st = store.New(mongoClient)
 		domainSvc = domain.NewService(st, cfg.DKIMSelector, cfg.PublicIP)
-		q = queue.New(st, mailer, signer, cfg.DKIMDomain, cfg.Hostname, cfg.MaxDeliveryRetries, cfg.WarmupEnabled, cfg.PublicIP)
+		q = queue.New(st, mailer, signer, cfg.DKIMDomain, cfg.Hostname, cfg.MaxDeliveryRetries, cfg.WarmupEnabled, cfg.PublicIP, cfg.BounceWebhookURL, cfg.APIToken)
 		q.Start(ctx)
 		log.Info("multi-dominio + cola con reintentos + warm-up(%v) activos", cfg.WarmupEnabled)
 	} else {

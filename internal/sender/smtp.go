@@ -31,9 +31,15 @@ func NewMailer(hostname string, sourceIPs []string) *Mailer {
 	return &Mailer{hostname: hostname, sourceIPs: sourceIPs}
 }
 
-// Deliver resuelve el MX del destinatario y entrega el mensaje (ya firmado).
-// Devuelve nil si entregó, o *DeliverError clasificado.
+// Deliver entrega usando la IP de salida por defecto.
 func (m *Mailer) Deliver(ctx context.Context, fromAddr, toAddr string, raw []byte) *DeliverError {
+	return m.DeliverVia(ctx, "", fromAddr, toAddr, raw)
+}
+
+// DeliverVia resuelve el MX del destinatario y entrega el mensaje (ya firmado)
+// saliendo por `sourceIP` (para pools de IP / IP dedicada por cliente). Si
+// sourceIP está vacío, usa la primera IP configurada.
+func (m *Mailer) DeliverVia(ctx context.Context, sourceIP, fromAddr, toAddr string, raw []byte) *DeliverError {
 	domain := addrDomain(toAddr)
 	if domain == "" {
 		return &DeliverError{Permanent: true, Msg: "destinatario inválido: " + toAddr}
@@ -45,7 +51,7 @@ func (m *Mailer) Deliver(ctx context.Context, fromAddr, toAddr string, raw []byt
 
 	var last *DeliverError
 	for _, mx := range hosts {
-		if de := m.deliverTo(ctx, mx, fromAddr, toAddr, raw); de != nil {
+		if de := m.deliverTo(ctx, sourceIP, mx, fromAddr, toAddr, raw); de != nil {
 			last = de
 			continue
 		}
@@ -54,10 +60,13 @@ func (m *Mailer) Deliver(ctx context.Context, fromAddr, toAddr string, raw []byt
 	return last
 }
 
-func (m *Mailer) deliverTo(ctx context.Context, mxHost, fromAddr, toAddr string, raw []byte) *DeliverError {
+func (m *Mailer) deliverTo(ctx context.Context, sourceIP, mxHost, fromAddr, toAddr string, raw []byte) *DeliverError {
+	if sourceIP == "" && len(m.sourceIPs) > 0 {
+		sourceIP = m.sourceIPs[0]
+	}
 	dialer := &net.Dialer{Timeout: 20 * time.Second}
-	if len(m.sourceIPs) > 0 && m.sourceIPs[0] != "" {
-		if ip := net.ParseIP(m.sourceIPs[0]); ip != nil {
+	if sourceIP != "" {
+		if ip := net.ParseIP(sourceIP); ip != nil {
 			dialer.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}

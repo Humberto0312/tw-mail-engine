@@ -1,8 +1,11 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,13 +24,15 @@ type Queue struct {
 	envSigner   *dkim.Signer
 	envDomain   string
 	hostname    string
-	maxAttempts int
-	warmup      bool
-	warmupKey   string
-	log         *core.Logger
+	maxAttempts  int
+	warmup       bool
+	warmupKey    string
+	webhookURL   string
+	webhookToken string
+	log          *core.Logger
 }
 
-func New(st *store.Store, mailer *sender.Mailer, envSigner *dkim.Signer, envDomain, hostname string, maxAttempts int, warmup bool, warmupKey string) *Queue {
+func New(st *store.Store, mailer *sender.Mailer, envSigner *dkim.Signer, envDomain, hostname string, maxAttempts int, warmup bool, warmupKey, webhookURL, webhookToken string) *Queue {
 	if maxAttempts < 1 {
 		maxAttempts = 4
 	}
@@ -37,8 +42,32 @@ func New(st *store.Store, mailer *sender.Mailer, envSigner *dkim.Signer, envDoma
 	return &Queue{
 		st: st, mailer: mailer, envSigner: envSigner, envDomain: envDomain,
 		hostname: hostname, maxAttempts: maxAttempts, warmup: warmup, warmupKey: warmupKey,
+		webhookURL: webhookURL, webhookToken: webhookToken,
 		log: core.Root().With("queue"),
 	}
+}
+
+// notify — avisa a api-matrix el resultado de un envío (fire-and-forget).
+func (q *Queue) notify(m store.Message, status, errMsg string) {
+	if q.webhookURL == "" {
+		return
+	}
+	go func() {
+		body, _ := json.Marshal(map[string]any{
+			"messageId": m.MessageID, "tenantId": m.TenantID, "campaignId": m.CampaignID,
+			"to": m.To, "status": status, "error": errMsg,
+		})
+		req, err := http.NewRequest("POST", q.webhookURL, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+q.webhookToken)
+		client := &http.Client{Timeout: 10 * time.Second}
+		if resp, e := client.Do(req); e == nil && resp != nil {
+			resp.Body.Close()
+		}
+	}()
 }
 
 func (q *Queue) Start(ctx context.Context) {
@@ -123,7 +152,9 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 		}
 	}
 
-	de := q.mailer.Deliver(ctx, m.FromEmail, m.To, raw)
+	// Pool de IPs: usa la IP dedicada de la empresa si tiene; si no, la compartida.
+	sourceIP, _ := q.st.TenantIP(ctx, m.TenantID)
+	de := q.mailer.DeliverVia(ctx, sourceIP, m.FromEmail, m.To, raw)
 	if de == nil {
 		_ = q.st.MarkSent(ctx, m.ID)
 		if q.warmup {
@@ -132,6 +163,7 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 		if m.TenantID != "" {
 			_ = q.st.TenantIncSent(ctx, m.TenantID)
 		}
+		q.notify(m, "sent", "")
 		q.log.Info("enviado to=%s intentos=%d", m.To, attempts)
 		return
 	}
@@ -150,11 +182,13 @@ func (q *Queue) process(ctx context.Context, m store.Message) {
 				}
 			}
 		}
+		q.notify(m, "bounced", de.Msg)
 		q.log.Warn("rebote duro to=%s: %s (suprimido)", m.To, de.Msg)
 		return
 	}
 	if attempts >= q.maxAttempts {
 		_ = q.st.MarkFailed(ctx, m.ID, "agotados reintentos: "+de.Msg, attempts)
+		q.notify(m, "failed", de.Msg)
 		q.log.Warn("agotado to=%s tras %d intentos: %s", m.To, attempts, de.Msg)
 		return
 	}
