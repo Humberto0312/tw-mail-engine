@@ -11,6 +11,7 @@ import (
 	"tw-mail-engine/internal/core"
 	"tw-mail-engine/internal/dkim"
 	"tw-mail-engine/internal/domain"
+	"tw-mail-engine/internal/queue"
 	"tw-mail-engine/internal/sender"
 	"tw-mail-engine/internal/store"
 )
@@ -23,11 +24,12 @@ type Server struct {
 	domainSvc *domain.Service // puede ser nil (sin Mongo)
 	signer    *dkim.Signer    // firma por defecto del .env (fallback)
 	mailer    *sender.Mailer
+	q         *queue.Queue // cola (puede ser nil → envío síncrono)
 	log       *core.Logger
 	srv       *http.Server
 }
 
-func NewServer(cfg *config.Config, mongo *core.MongoClient, st *store.Store, domainSvc *domain.Service, signer *dkim.Signer, mailer *sender.Mailer) *Server {
+func NewServer(cfg *config.Config, mongo *core.MongoClient, st *store.Store, domainSvc *domain.Service, signer *dkim.Signer, mailer *sender.Mailer, q *queue.Queue) *Server {
 	return &Server{
 		cfg:       cfg,
 		mongo:     mongo,
@@ -35,6 +37,7 @@ func NewServer(cfg *config.Config, mongo *core.MongoClient, st *store.Store, dom
 		domainSvc: domainSvc,
 		signer:    signer,
 		mailer:    mailer,
+		q:         q,
 		log:       core.Root().With("http-api"),
 	}
 }

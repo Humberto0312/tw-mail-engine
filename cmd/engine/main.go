@@ -12,6 +12,7 @@ import (
 	"tw-mail-engine/internal/core"
 	"tw-mail-engine/internal/dkim"
 	"tw-mail-engine/internal/domain"
+	"tw-mail-engine/internal/queue"
 	"tw-mail-engine/internal/sender"
 	"tw-mail-engine/internal/store"
 )
@@ -74,19 +75,22 @@ func main() {
 	// 6. Mailer (entrega SMTP por puerto 25)
 	mailer := sender.NewMailer(cfg.Hostname, cfg.SendIPs)
 
-	// 7. Store + servicio de dominios (multi-tenant) — requieren Mongo.
+	// 7. Store + servicio de dominios + cola (multi-tenant) — requieren Mongo.
 	var st *store.Store
 	var domainSvc *domain.Service
+	var q *queue.Queue
 	if mongoClient != nil {
 		st = store.New(mongoClient)
 		domainSvc = domain.NewService(st, cfg.DKIMSelector, cfg.PublicIP)
-		log.Info("multi-dominio activo — verificación y supresión disponibles")
+		q = queue.New(st, mailer, signer, cfg.DKIMDomain, cfg.Hostname, cfg.MaxDeliveryRetries, cfg.WarmupEnabled, cfg.PublicIP)
+		q.Start(ctx)
+		log.Info("multi-dominio + cola con reintentos + warm-up(%v) activos", cfg.WarmupEnabled)
 	} else {
-		log.Warn("sin Mongo — multi-dominio y supresión deshabilitados (solo dominio del .env)")
+		log.Warn("sin Mongo — multi-dominio, cola y supresión deshabilitados (envío síncrono con dominio del .env)")
 	}
 
 	// 8. HTTP API
-	srv := api.NewServer(cfg, mongoClient, st, domainSvc, signer, mailer)
+	srv := api.NewServer(cfg, mongoClient, st, domainSvc, signer, mailer, q)
 	if err := srv.Start(); err != nil {
 		log.Error("arrancando HTTP: %v", err)
 		os.Exit(1)

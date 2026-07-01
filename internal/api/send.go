@@ -9,6 +9,7 @@ import (
 
 	"tw-mail-engine/internal/dkim"
 	"tw-mail-engine/internal/message"
+	"tw-mail-engine/internal/store"
 )
 
 // SendRequest — contrato que api-matrix manda al motor para entregar un correo.
@@ -39,7 +40,6 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Supresión: no enviar a rebotes duros / quejas / bajas.
 	if s.store != nil {
 		if sup, _ := s.store.IsSuppressed(ctx, req.To); sup {
 			writeError(w, http.StatusForbidden, "destinatario en lista de supresión")
@@ -47,7 +47,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Firma DKIM del dominio del remitente (multi-dominio).
+	// Validación temprana: el dominio del remitente debe poder firmarse
+	// (registrado+verificado, o el dominio del .env). Falla rápido y claro.
 	signer, err := s.resolveSigner(ctx, req.FromEmail)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -60,38 +61,41 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		messageID = fmt.Sprintf("<%d@%s>", now.UnixNano(), s.cfg.Hostname)
 	}
 
-	raw := message.Build(message.Outgoing{
-		FromName:  req.FromName,
-		FromEmail: req.FromEmail,
-		ReplyTo:   req.ReplyTo,
-		To:        req.To,
-		Subject:   req.Subject,
-		HTML:      req.HTML,
-		Text:      req.Text,
-		Headers:   req.Headers,
-	}, now, messageID)
-
-	if signer != nil {
-		if signed, serr := signer.Sign(raw); serr != nil {
-			s.log.Warn("DKIM no pudo firmar (%v) — envío sin firma", serr)
-		} else {
-			raw = signed
+	// Con cola (async): encola y responde 202. La entrega + reintentos las hace el worker.
+	if s.q != nil && s.store != nil {
+		qid, err := s.store.Enqueue(ctx, store.Message{
+			MessageID: messageID, TenantID: req.TenantID, CampaignID: req.CampaignID,
+			FromName: req.FromName, FromEmail: req.FromEmail, ReplyTo: req.ReplyTo,
+			To: req.To, Subject: req.Subject, HTML: req.HTML, Text: req.Text, Headers: req.Headers,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "no se pudo encolar: "+err.Error())
+			return
 		}
-	}
-
-	if err := s.mailer.Deliver(ctx, req.FromEmail, req.To, raw); err != nil {
-		s.log.Warn("entrega fallida to=%s: %v", req.To, err)
-		writeError(w, http.StatusBadGateway, "fallo en la entrega: "+err.Error())
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "messageId": messageID, "queueId": qid})
 		return
 	}
 
+	// Fallback síncrono (sin cola/Mongo).
+	raw := message.Build(message.Outgoing{
+		FromName: req.FromName, FromEmail: req.FromEmail, ReplyTo: req.ReplyTo,
+		To: req.To, Subject: req.Subject, HTML: req.HTML, Text: req.Text, Headers: req.Headers,
+	}, now, messageID)
+	if signer != nil {
+		if signed, serr := signer.Sign(raw); serr == nil {
+			raw = signed
+		}
+	}
+	if de := s.mailer.Deliver(ctx, req.FromEmail, req.To, raw); de != nil {
+		s.log.Warn("entrega fallida to=%s: %s", req.To, de.Msg)
+		writeError(w, http.StatusBadGateway, "fallo en la entrega: "+de.Msg)
+		return
+	}
 	s.log.Info("entregado to=%s tenant=%s msgId=%s", req.To, req.TenantID, messageID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "messageId": messageID})
 }
 
 // resolveSigner devuelve el firmante DKIM del dominio del remitente.
-// 1) dominio registrado y verificado en el store → su llave.
-// 2) fallback: dominio del .env (mta1...) con la llave montada.
 func (s *Server) resolveSigner(ctx context.Context, fromEmail string) (*dkim.Signer, error) {
 	dom := domainOf(fromEmail)
 	if dom == "" {

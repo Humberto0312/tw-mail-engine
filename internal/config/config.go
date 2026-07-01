@@ -45,6 +45,9 @@ type Config struct {
 
 	// IP pública usada para generar los registros SPF de los dominios de clientes.
 	PublicIP string
+
+	// Warm-up automático: topes diarios por IP que suben día a día.
+	WarmupEnabled bool
 }
 
 // Load carga la config desde .env (si existe) + variables de entorno.
@@ -67,6 +70,7 @@ func Load() (*Config, error) {
 		DKIMDomain:         getEnv("DKIM_DOMAIN", ""),
 		DKIMKeyPath:        getEnv("DKIM_PRIVATE_KEY_PATH", ""),
 		PublicIP:           getEnv("PUBLIC_IP", ""),
+		WarmupEnabled:      getEnvBool("WARMUP_ENABLED", true),
 	}
 
 	if cfg.APIToken == "" {
@@ -112,6 +116,16 @@ func getEnvInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+	}
+	return def
+}
+
+func getEnvBool(key string, def bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
 	}
 	return def
 }

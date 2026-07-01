@@ -3,17 +3,25 @@ package sender
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"sort"
 	"strings"
 	"time"
 )
 
+// DeliverError — error de entrega clasificado. Permanent=true (5xx / dominio
+// inválido) → no reintentar y suprimir. Permanent=false (4xx / greylist / red)
+// → reintentar más tarde.
+type DeliverError struct {
+	Permanent bool
+	Msg       string
+}
+
+func (e *DeliverError) Error() string { return e.Msg }
+
 // Mailer entrega correos al MX del destinatario por el puerto 25.
-// sourceIPs prepara el camino al pool de IPs (IP dedicada por cliente):
-// si hay una IP, se usa como dirección de origen del socket.
 type Mailer struct {
 	hostname  string
 	sourceIPs []string
@@ -24,72 +32,86 @@ func NewMailer(hostname string, sourceIPs []string) *Mailer {
 }
 
 // Deliver resuelve el MX del destinatario y entrega el mensaje (ya firmado).
-func (m *Mailer) Deliver(ctx context.Context, fromAddr, toAddr string, raw []byte) error {
+// Devuelve nil si entregó, o *DeliverError clasificado.
+func (m *Mailer) Deliver(ctx context.Context, fromAddr, toAddr string, raw []byte) *DeliverError {
 	domain := addrDomain(toAddr)
 	if domain == "" {
-		return fmt.Errorf("destinatario inválido: %s", toAddr)
+		return &DeliverError{Permanent: true, Msg: "destinatario inválido: " + toAddr}
 	}
 	hosts, err := lookupMX(domain)
 	if err != nil || len(hosts) == 0 {
-		return fmt.Errorf("sin MX para %s: %v", domain, err)
+		return &DeliverError{Permanent: true, Msg: "sin MX para " + domain}
 	}
 
-	var lastErr error
+	var last *DeliverError
 	for _, mx := range hosts {
-		if err := m.deliverTo(ctx, mx, fromAddr, toAddr, raw); err != nil {
-			lastErr = err
-			continue // probar el siguiente MX
+		if de := m.deliverTo(ctx, mx, fromAddr, toAddr, raw); de != nil {
+			last = de
+			continue
 		}
-		return nil // entregado
+		return nil
 	}
-	return fmt.Errorf("no se pudo entregar a %s: %w", domain, lastErr)
+	return last
 }
 
-func (m *Mailer) deliverTo(ctx context.Context, mxHost, fromAddr, toAddr string, raw []byte) error {
+func (m *Mailer) deliverTo(ctx context.Context, mxHost, fromAddr, toAddr string, raw []byte) *DeliverError {
 	dialer := &net.Dialer{Timeout: 20 * time.Second}
 	if len(m.sourceIPs) > 0 && m.sourceIPs[0] != "" {
 		if ip := net.ParseIP(m.sourceIPs[0]); ip != nil {
 			dialer.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}
-	// tcp4: la IPv6 de OVH no enruta; forzamos IPv4 para la entrega.
 	conn, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(mxHost, "25"))
 	if err != nil {
-		return err
+		return &DeliverError{Permanent: false, Msg: err.Error()}
 	}
 	c, err := smtp.NewClient(conn, mxHost)
 	if err != nil {
 		conn.Close()
-		return err
+		return &DeliverError{Permanent: false, Msg: err.Error()}
 	}
 	defer c.Close()
 
 	if err := c.Hello(m.hostname); err != nil {
-		return err
+		return classify(err)
 	}
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		// TLS oportunista: ciframos si el MX lo soporta, sin exigir cert válido.
 		if err := c.StartTLS(&tls.Config{ServerName: mxHost, InsecureSkipVerify: true}); err != nil {
-			return err
+			return &DeliverError{Permanent: false, Msg: err.Error()}
 		}
 	}
 	if err := c.Mail(fromAddr); err != nil {
-		return err
+		return classify(err)
 	}
 	if err := c.Rcpt(toAddr); err != nil {
-		return err
+		return classify(err)
 	}
 	w, err := c.Data()
 	if err != nil {
-		return err
+		return classify(err)
 	}
 	if _, err := w.Write(raw); err != nil {
-		return err
+		return &DeliverError{Permanent: false, Msg: err.Error()}
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return classify(err)
 	}
-	return c.Quit()
+	if err := c.Quit(); err != nil {
+		// ya entregó; un error en QUIT no invalida la entrega
+		return nil
+	}
+	return nil
+}
+
+// classify — 5xx = permanente; 4xx u otros = temporal (reintentar).
+func classify(err error) *DeliverError {
+	if err == nil {
+		return nil
+	}
+	if te, ok := err.(*textproto.Error); ok {
+		return &DeliverError{Permanent: te.Code >= 500, Msg: err.Error()}
+	}
+	return &DeliverError{Permanent: false, Msg: err.Error()}
 }
 
 func lookupMX(domain string) ([]string, error) {
