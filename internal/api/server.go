@@ -49,6 +49,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/domains", s.auth(s.handleRegisterDomain))
 	mux.HandleFunc("POST /v1/domains/verify", s.auth(s.handleVerifyDomain))
 	mux.HandleFunc("POST /v1/suppress", s.auth(s.handleSuppress))
+	// Ver y deshacer la lista de supresión: hasta ahora solo se podía añadir,
+	// y una dirección bloqueada por error se perdía para siempre.
+	mux.HandleFunc("GET /v1/suppressions", s.auth(s.handleListSuppressions))
+	mux.HandleFunc("DELETE /v1/suppress", s.auth(s.handleUnsuppress))
 
 	s.srv = &http.Server{
 		Addr:         ":" + s.cfg.Port,

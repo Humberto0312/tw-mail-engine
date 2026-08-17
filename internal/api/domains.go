@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 type domainRequest struct {
@@ -80,4 +81,49 @@ func (s *Server) handleSuppress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "suppressed", "email": req.Email})
+}
+
+// GET /v1/suppressions?query=&limit= — quién está bloqueado y por qué.
+func (s *Server) handleListSuppressions(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "supresión no disponible (sin Mongo)")
+		return
+	}
+	limit, _ := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
+	items, err := s.store.ListSuppressions(r.Context(), r.URL.Query().Get("query"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	total, _ := s.store.CountSuppressions(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+// DELETE /v1/suppress — saca una dirección de la lista.
+//
+// Es una decisión con consecuencias: si la dirección rebotó de verdad, volver
+// a escribirle daña la reputación del dominio y acaba perjudicando a todos los
+// envíos. Por eso lo hace una persona a mano y queda anotado en el registro,
+// nunca un proceso automático.
+func (s *Server) handleUnsuppress(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "supresión no disponible (sin Mongo)")
+		return
+	}
+	var req suppressRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "email es obligatorio")
+		return
+	}
+	removed, err := s.store.Unsuppress(r.Context(), req.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !removed {
+		writeError(w, http.StatusNotFound, "esa dirección no estaba en la lista")
+		return
+	}
+	s.log.Info("supresión liberada email=%s", req.Email)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "released", "email": req.Email})
 }

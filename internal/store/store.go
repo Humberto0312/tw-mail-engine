@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,6 +79,61 @@ func (s *Store) Suppress(ctx context.Context, email, reason string) error {
 		options.Update().SetUpsert(true),
 	)
 	return err
+}
+
+// Suppression — una dirección bloqueada, con el porqué y desde cuándo.
+type Suppression struct {
+	Email     string    `bson:"email" json:"email"`
+	Reason    string    `bson:"reason" json:"reason"`
+	CreatedAt time.Time `bson:"createdAt" json:"createdAt"`
+}
+
+// ListSuppressions devuelve las supresiones, de la más reciente a la más
+// antigua. `query` filtra por trozo de dirección.
+//
+// Hasta ahora solo se podía AÑADIR a esta lista. Una lista que no se puede ni
+// mirar ni deshacer no es una protección, es una trampa: basta un rebote de
+// cuando el dominio aún no estaba autenticado para perder a un contacto para
+// siempre, sin manera de saberlo ni de recuperarlo.
+func (s *Store) ListSuppressions(ctx context.Context, query string, limit int64) ([]Suppression, error) {
+	filter := bson.M{}
+	if q := strings.TrimSpace(strings.ToLower(query)); q != "" {
+		// Se escapa lo que Mongo interpretaría como expresión regular: sin esto
+		// una dirección con un punto o un signo de interrogación buscaría otra
+		// cosa distinta de la que se escribió.
+		filter["email"] = bson.M{"$regex": regexp.QuoteMeta(q)}
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	cur, err := s.col("mail_suppressions").Find(ctx, filter,
+		options.Find().SetSort(bson.M{"createdAt": -1}).SetLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	out := []Suppression{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Unsuppress quita una dirección de la lista. Devuelve si existía.
+func (s *Store) Unsuppress(ctx context.Context, email string) (bool, error) {
+	res, err := s.col("mail_suppressions").DeleteOne(ctx,
+		bson.M{"email": strings.ToLower(strings.TrimSpace(email))})
+	if err != nil {
+		return false, err
+	}
+	return res.DeletedCount > 0, nil
+}
+
+// CountSuppressions — total, para saber el tamaño real aunque la lista venga
+// recortada.
+func (s *Store) CountSuppressions(ctx context.Context) (int64, error) {
+	return s.col("mail_suppressions").CountDocuments(ctx, bson.M{})
 }
 
 // ---------- Cola de mensajes ----------
